@@ -4,11 +4,31 @@ from django.core.exceptions import ValidationError
 
 
 # =========================
+# 🔥 Base Model
+# =========================
+class BaseModel(models.Model):
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    is_deleted = models.BooleanField(default=False)
+
+    class Meta:
+        abstract = True
+
+
+# =========================
 # Tenant Model
 # =========================
-class Tenant(models.Model):
-    name = models.CharField(max_length=255)
-    created_at = models.DateTimeField(auto_now_add=True)
+class Tenant(BaseModel):
+    name = models.CharField(max_length=255, unique=True)
+
+    created_by = models.ForeignKey(
+        'User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='created_tenants'
+    )
 
     def __str__(self):
         return self.name
@@ -17,7 +37,7 @@ class Tenant(models.Model):
 # =========================
 # Custom User Model
 # =========================
-class User(AbstractUser):
+class User(AbstractUser, BaseModel):
 
     ROLE_CHOICES = (
         ('super_admin', 'Super Admin'),
@@ -40,9 +60,6 @@ class User(AbstractUser):
         related_name='users'
     )
 
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
     # =========================
     # Role Helpers
     # =========================
@@ -63,29 +80,21 @@ class User(AbstractUser):
     # =========================
     def clean(self):
 
-        # Super Admin → no tenant
-        if self.role == 'super_admin':
+        if self.is_superuser:
             self.tenant = None
+            return
 
-        # Host → must have tenant
-        if self.role == 'host' and not self.tenant:
-            raise ValidationError("Host must belong to a tenant")
+        if self.role in ['host', 'user'] and not self.tenant:
+            raise ValidationError("Host/User must belong to a tenant")
 
-        # User → must have tenant (STRICT SaaS)
-        if self.role == 'user' and not self.tenant:
-            raise ValidationError("User must belong to a tenant")
-
-    # =========================
-    # Save override
-    # =========================
     def save(self, *args, **kwargs):
+        if not kwargs.pop('skip_validation', False):
+            self.full_clean()
 
-        # Auto convert Django superuser → SaaS super admin
         if self.is_superuser:
             self.role = 'super_admin'
             self.tenant = None
 
-        self.full_clean()
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -95,9 +104,23 @@ class User(AbstractUser):
 # =========================
 # Property Model
 # =========================
-class Property(models.Model):
+class Property(BaseModel):
+
+    STATUS_CHOICES = (
+        ('active', 'Active'),
+        ('inactive', 'Inactive'),
+        ('blocked', 'Blocked'),
+    )
+
     title = models.CharField(max_length=255)
     price = models.DecimalField(max_digits=10, decimal_places=2)
+    image = models.ImageField(upload_to='properties/', null=True, blank=True)
+
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='active'
+    )
 
     tenant = models.ForeignKey(
         Tenant,
@@ -105,43 +128,58 @@ class Property(models.Model):
         related_name='properties'
     )
 
-    # 🔥 NEW (IMPORTANT)
     host = models.ForeignKey(
         User,
         on_delete=models.CASCADE,
         related_name='host_properties'
     )
 
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='created_properties'
+    )
 
-    # Validation
+    updated_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='updated_properties'
+    )
+
     def clean(self):
         if not self.tenant:
             raise ValidationError("Property must belong to a tenant")
 
-        if self.host.role != 'host':
+        if not self.host or self.host.role != 'host':
             raise ValidationError("Only host can own property")
 
         if self.host.tenant != self.tenant:
             raise ValidationError("Host and Property tenant mismatch")
 
-    def save(self, *args, **kwargs):
-        self.full_clean()
-        super().save(*args, **kwargs)
-
     def __str__(self):
         return self.title
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['tenant']),
+            models.Index(fields=['host']),
+            models.Index(fields=['status']),
+        ]
 
 
 # =========================
 # Booking Model
 # =========================
-class Booking(models.Model):
+class Booking(BaseModel):
 
     STATUS_CHOICES = (
         ('pending', 'Pending'),
         ('approved', 'Approved'),
         ('rejected', 'Rejected'),
+        ('cancelled', 'Cancelled'),
     )
 
     user = models.ForeignKey(
@@ -165,25 +203,32 @@ class Booking(models.Model):
         default='pending'
     )
 
-    created_at = models.DateTimeField(auto_now_add=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
 
-    # Validation
     def clean(self):
+
         if self.check_in >= self.check_out:
             raise ValidationError("Check-out must be after check-in")
 
-        # 🔥 SaaS Security Check
         if self.user.tenant != self.property.tenant:
             raise ValidationError("User and Property must belong to same tenant")
 
-    def save(self, *args, **kwargs):
-        self.full_clean()
-        super().save(*args, **kwargs)
+        overlapping = Booking.objects.filter(
+            property=self.property,
+            check_in__lt=self.check_out,
+            check_out__gt=self.check_in,
+            status='approved',
+            is_deleted=False
+        ).exclude(id=self.id)
+
+        if overlapping.exists():
+            raise ValidationError("Property already booked for selected dates")
+
+    def __str__(self):
+        return f"{self.user.username} → {self.property.title}"
 
     class Meta:
         indexes = [
             models.Index(fields=['property', 'status']),
+            models.Index(fields=['check_in', 'check_out']),
         ]
-
-    def __str__(self):
-        return f"{self.user.username} → {self.property.title}"
