@@ -1,7 +1,9 @@
 from rest_framework import serializers
 from django.contrib.auth import authenticate
 from django.db import transaction
+from django.contrib.auth.password_validation import validate_password
 from rest_framework_simplejwt.tokens import RefreshToken
+
 from .models import User, Tenant, Property, Booking
 
 
@@ -11,10 +13,20 @@ from .models import User, Tenant, Property, Booking
 class RegisterSerializer(serializers.ModelSerializer):
 
     role = serializers.CharField(write_only=True)
+    email = serializers.EmailField()
 
     class Meta:
         model = User
         fields = ['username', 'email', 'password', 'role']
+
+    def validate_email(self, value):
+        if User.objects.filter(email=value).exists():
+            raise serializers.ValidationError("Email already exists")
+        return value
+
+    def validate_password(self, value):
+        validate_password(value)
+        return value
 
     def validate_role(self, value):
         if value not in dict(User.ROLE_CHOICES):
@@ -32,10 +44,16 @@ class RegisterSerializer(serializers.ModelSerializer):
 
         tenant = None
 
-        # ✅ Host → create tenant
+        # Host → create tenant
         if role == 'host':
             tenant = Tenant.objects.create(
                 name=f"{validated_data['username']}'s workspace"
+            )
+
+        # User → must belong to tenant (future: invite system)
+        if role == 'user':
+            raise serializers.ValidationError(
+                "Users must be invited to a tenant (not self-registered)"
             )
 
         user = User(**validated_data)
@@ -48,33 +66,30 @@ class RegisterSerializer(serializers.ModelSerializer):
 
 
 # =========================
-# 🔥 ADMIN CREATE (NEW)
+# ADMIN CREATE
 # =========================
 class AdminCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ['username', 'email', 'password']
 
-    def validate(self, data):
-        if User.objects.filter(username=data['username']).exists():
-            raise serializers.ValidationError("Username already exists")
-        return data
+    def validate_email(self, value):
+        if User.objects.filter(email=value).exists():
+            raise serializers.ValidationError("Email already exists")
+        return value
 
     def create(self, validated_data):
         user = User.objects.create_user(**validated_data)
 
-        # 🔥 Make super admin
         user.is_superuser = True
         user.is_staff = True
-
-        # role auto set hoga model me
         user.save()
 
         return user
 
 
 # =========================
-# LOGIN (JWT TOKEN)
+# LOGIN
 # =========================
 class LoginSerializer(serializers.Serializer):
     username = serializers.CharField()
@@ -121,7 +136,17 @@ class PropertySerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("User has no tenant")
 
         validated_data['tenant'] = user.tenant
+        validated_data['host'] = user  # 🔥 important
+
         return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        user = self.context['request'].user
+
+        if instance.tenant != user.tenant:
+            raise serializers.ValidationError("Not allowed")
+
+        return super().update(instance, validated_data)
 
 
 # =========================
@@ -134,13 +159,14 @@ class BookingSerializer(serializers.ModelSerializer):
         read_only_fields = ['status', 'created_at']
 
     def validate(self, data):
+        user = self.context['request'].user
+        prop = data['property']
+
         if data['check_in'] >= data['check_out']:
             raise serializers.ValidationError("Invalid date range")
 
-        user = self.context['request'].user
-
-        # 🔐 Tenant security
-        if user.tenant != data['property'].tenant:
+        # Tenant security
+        if user.tenant != prop.tenant:
             raise serializers.ValidationError("Tenant mismatch")
 
         return data

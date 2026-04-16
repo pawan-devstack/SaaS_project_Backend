@@ -1,30 +1,6 @@
 from rest_framework.permissions import BasePermission
 
 
-# Base Permission
-class BaseRolePermission(BasePermission):
-    def has_permission(self, request, view):
-        return request.user and request.user.is_authenticated
-
-
-# Super Admin
-class IsSuperAdmin(BaseRolePermission):
-    def has_permission(self, request, view):
-        return super().has_permission(request, view) and request.user.is_super_admin
-
-
-# Host
-class IsHost(BaseRolePermission):
-    def has_permission(self, request, view):
-        return super().has_permission(request, view) and (
-            request.user.is_host or request.user.is_super_admin
-        )
-
-
-# End User (STRICT)
-class IsEndUser(BaseRolePermission):from rest_framework.permissions import BasePermission
-
-
 # =========================
 # Base Permission
 # =========================
@@ -33,7 +9,7 @@ class BaseRolePermission(BasePermission):
     Ensures user is authenticated
     """
     def has_permission(self, request, view):
-        return request.user and request.user.is_authenticated
+        return bool(request.user and request.user.is_authenticated)
 
 
 # =========================
@@ -74,16 +50,21 @@ class IsOwner(BasePermission):
 
 
 # =========================
-# Tenant Based Permission 
+# Tenant Based Permission
 # =========================
 class IsSameTenant(BasePermission):
     """
     Ensures user and object belong to same tenant
     """
+
     def has_object_permission(self, request, view, obj):
         user_tenant = getattr(request.user, "tenant", None)
+
+        # Try direct tenant
         obj_tenant = getattr(obj, "tenant", None)
 
+        # Fallback for Booking (property → tenant)
+        if not obj_tenant and hasattr(obj, "property"):
+            obj_tenant = getattr(obj.property, "tenant", None)
+
         return user_tenant and obj_tenant and user_tenant == obj_tenant
-    def has_permission(self, request, view):
-        return super().has_permission(request, view) and request.user.is_user

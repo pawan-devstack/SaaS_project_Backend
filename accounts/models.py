@@ -15,34 +15,6 @@ class Tenant(models.Model):
 
 
 # =========================
-# Property Model
-# =========================
-class Property(models.Model):
-    title = models.CharField(max_length=255)
-    price = models.DecimalField(max_digits=10, decimal_places=2)
-
-    tenant = models.ForeignKey(
-        Tenant,
-        on_delete=models.CASCADE,
-        related_name='properties'
-    )
-
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    # Validation
-    def clean(self):
-        if not self.tenant:
-            raise ValidationError("Property must belong to a tenant")
-
-    def save(self, *args, **kwargs):
-        self.full_clean()
-        super().save(*args, **kwargs)
-
-    def __str__(self):
-        return self.title
-
-
-# =========================
 # Custom User Model
 # =========================
 class User(AbstractUser):
@@ -90,24 +62,75 @@ class User(AbstractUser):
     # Validation
     # =========================
     def clean(self):
+
+        # Super Admin → no tenant
+        if self.role == 'super_admin':
+            self.tenant = None
+
+        # Host → must have tenant
         if self.role == 'host' and not self.tenant:
             raise ValidationError("Host must belong to a tenant")
 
-        if self.role == 'user' and self.tenant is None:
-            pass  # allow for now (can enforce later)
+        # User → must have tenant (STRICT SaaS)
+        if self.role == 'user' and not self.tenant:
+            raise ValidationError("User must belong to a tenant")
 
     # =========================
     # Save override
     # =========================
     def save(self, *args, **kwargs):
-        if self.is_superuser and self.role != 'super_admin':
+
+        # Auto convert Django superuser → SaaS super admin
+        if self.is_superuser:
             self.role = 'super_admin'
+            self.tenant = None
 
         self.full_clean()
         super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.username} - {self.role}"
+
+
+# =========================
+# Property Model
+# =========================
+class Property(models.Model):
+    title = models.CharField(max_length=255)
+    price = models.DecimalField(max_digits=10, decimal_places=2)
+
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name='properties'
+    )
+
+    # 🔥 NEW (IMPORTANT)
+    host = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='host_properties'
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    # Validation
+    def clean(self):
+        if not self.tenant:
+            raise ValidationError("Property must belong to a tenant")
+
+        if self.host.role != 'host':
+            raise ValidationError("Only host can own property")
+
+        if self.host.tenant != self.tenant:
+            raise ValidationError("Host and Property tenant mismatch")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.title
 
 
 # =========================
@@ -144,9 +167,7 @@ class Booking(models.Model):
 
     created_at = models.DateTimeField(auto_now_add=True)
 
-    # =========================
     # Validation
-    # =========================
     def clean(self):
         if self.check_in >= self.check_out:
             raise ValidationError("Check-out must be after check-in")

@@ -8,6 +8,7 @@ urlpatterns = [
     path('profile/', ProfileView.as_view()),
 
     # 🏠 Property
+    path('properties/create/', PropertyCreateView.as_view()),
     path('properties/', PropertyListView.as_view()),
     path('properties/<int:pk>/', PropertyDetailView.as_view()),
     path('properties/<int:pk>/update/', PropertyUpdateView.as_view()),
